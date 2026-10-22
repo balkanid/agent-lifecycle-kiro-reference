@@ -137,9 +137,9 @@ class GuardrailPolicyTests(unittest.TestCase):
         self.assertEqual(d.outcome, "sensitive")
 
     def test_production_is_sensitive(self):
-        d = self.decide("shell", {"command": f"aws ecs list-services --cluster payments-prod {PROFILE}"})
+        d = self.decide("shell", {"command": f"aws ecs list-services --cluster app-prod {PROFILE}"})
         self.assertEqual((d.outcome, d.rule_id), ("sensitive", "production-access"))
-        d = self.decide("shell", {"command": f"aws ecs list-services --cluster payments-staging {PROFILE}"})
+        d = self.decide("shell", {"command": f"aws ecs list-services --cluster app-staging {PROFILE}"})
         self.assertEqual(d.outcome, "allow")
 
     def test_subagent_requires_registered_child(self):
