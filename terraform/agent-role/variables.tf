@@ -3,11 +3,6 @@ variable "aws_region" {
   default = "us-east-1"
 }
 
-variable "aws_account_id" {
-  type        = string
-  description = "12-digit AWS account id that owns the agent role."
-}
-
 variable "agent_name" {
   type        = string
   description = "Kiro agent name, matching .kiro/agents/<name>.json."

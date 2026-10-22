@@ -48,10 +48,10 @@ flowchart LR
 | Piece | File | What it does |
 |---|---|---|
 | Agent config | `.kiro/agents/<name>.json` | Kiro custom agent. Must carry the three BalkanID hooks, deny `~/.aws/**`, and point AWS MCP servers at the agent profile. `register_agent.py --lint-only` enforces this. |
-| Registration | `scripts/register_agent.py` | `createRequest` with `AGENT_ACCESS`, owner, purpose, intended role ARN and a metadata summary (tools, MCP servers, hooks, fingerprint, parent). Waits for approval; fails closed. |
+| Registration | `scripts/register_agent.py` | `createRequest` with `AGENT_ACCESS`, owner, purpose, intended role ARN and a metadata summary (tools, MCP servers, hooks, fingerprint, parent). Waits for approval; fails closed. An approval only counts if the request is `AGENT_ACCESS` and its metadata carries this exact config fingerprint, so a request id cannot be borrowed from another request or an older config. |
 | Agent role | `scripts/service_account_gate.py`, `terraform/agent-role` | `CREATE_SERVICE_ACCOUNT` approval, then Terraform creates `kiro-agent-<name>` under `/balkanid-kiro-agents/` with a permissions boundary. Only listed developer roles may assume it, and only with a SourceIdentity and the agent's session tags. |
 | Profile link | `scripts/setup_agent_profile.py` | Records the role ARN and BalkanID service account id, and writes the `credential_process` profile. |
-| Credentials | `scripts/agent_credentials.py` | Re-checks the approval, then assumes the agent role for 15 minutes. Caches until near expiry. |
+| Credentials | `scripts/agent_credentials.py` | Re-checks the approval, refuses any role other than `role/balkanid-kiro-agents/kiro-agent-<name>`, then assumes it for 15 minutes. Caches until near expiry. |
 | Guardrails | `scripts/kiro_hook.py`, `scripts/guardrails.py`, `.kiro/balkanid/guardrails.json` | Runs on SessionStart, every PreToolUse and SessionEnd. |
 | Grant policies | `terraform/grant-policies` | Account-wide policies BalkanID attaches for an approved grant window. |
 | PR gate | `.github/workflows/agent-approval.yml` | Required check: a changed agent config merges only with a live, matching approval. |
@@ -68,15 +68,19 @@ flowchart LR
 ### 2. Every tool call (PreToolUse)
 
 ```
+hook input unreadable (empty, not JSON, no tool_name)        -> block
 registration missing / config changed / approval not live  -> block
+approval not AGENT_ACCESS for this exact fingerprint        -> block
 deny rule matches                                          -> block (auto-deny)
-shell AWS CLI without --profile balkanid-agent-<name>     -> block (own identity only)
+any AWS CLI call in a shell command without its own
+  --profile balkanid-agent-<name> (checked per segment)     -> block (own identity only)
 subagent not registered as this agent's child              -> block
 sensitive rule matches:
-    approved grant still inside its window                 -> allow
-    request pending                                        -> block, "waiting on <id>"
-    request denied in the last 10 minutes                  -> block, do not retry
-    otherwise                                              -> raise SERVICE_ACCOUNT_ASSIGNMENT
+    approved, inside its window (from request creation)    -> allow
+    pending                                                -> block, "waiting on <id>"
+    denied or missing                                      -> block; never re-asked until the
+                                                              owner runs kiro_hook.py clear-grant
+    no request, or the window has passed                   -> raise SERVICE_ACCOUNT_ASSIGNMENT
                                                               (grant policy, duration), block
 otherwise                                                  -> allow
 ```
@@ -89,11 +93,11 @@ The hook raises a `SERVICE_ACCOUNT_ASSIGNMENT` against the agent's own service a
 
 ### 4. Subagents
 
-Register a child with `register_agent.py --agent <child> --parent <parent>` and apply `terraform/agent-role` with `parent_agent_name`. The child gets its own role, but shares the parent's permissions boundary, so it can never exceed its parent. The parent's hook only allows `subagent` and `delegate` calls naming a registered child.
+Register a child with `register_agent.py --agent <child> --parent <parent>` and apply `terraform/agent-role` with `parent_agent_name`. The child gets its own role, but shares the parent's permissions boundary, so it can never exceed its parent. The parent's hook only allows `subagent`, `use_subagent` and `delegate` calls whose agent name field exactly matches a registered child.
 
 ### 5. Ending a session
 
-`SessionEnd` deletes the cached credentials. Anything left behind expires with its STS session. Grants expire with their BalkanID duration.
+`SessionEnd` deletes the cached credentials. Kiro fires `SessionEnd` in the CLI; in the IDE, rely on the 15 minute STS lifetime. Anything left behind expires with its STS session. Grants expire with their BalkanID duration.
 
 ## Threat model
 
@@ -103,7 +107,8 @@ Register a child with `register_agent.py --agent <child> --parent <parent>` and 
 | Agent escalates privilege | IAM, Organizations, SSO and `sts:AssumeRole` denied by hook and by the permissions boundary | Both. The boundary holds even if a hook is bypassed. |
 | Agent reads secrets or customer data | Not in ViewOnlyAccess; only via a time-bound, step-up approved grant | IAM. The hook adds the request flow and a clear explanation. |
 | Agent destroys data | Destructive commands denied; boundary denies deletes of buckets, tables, databases and keys | Both. |
-| Someone widens the agent quietly | Config fingerprint; PR approval check; agent cannot write `.kiro/**` | BalkanID approval plus branch protection. |
+| Someone widens the agent quietly | Config fingerprint bound to the approval; PR check run with base-branch scripts; agent cannot read or write `.kiro/**`, the guardrail scripts, `.env` or the credential cache | BalkanID approval plus branch protection. |
+| Agent re-points its profile at a powerful role | `agent_credentials.py` only issues credentials for the agent's own role ARN pattern; `setup_agent_profile.py` refuses others | Hook process (not reachable by the agent) and IAM trust policy. |
 | BalkanID unreachable | Use a recent approved status for up to `BALKANID_MAX_STALE_SECONDS`, then block | Hook. |
 | Stolen agent credentials | 15 minute lifetime; SourceIdentity names the developer; session tags name the agent | AWS. CloudTrail attributes every call to agent and developer. |
 

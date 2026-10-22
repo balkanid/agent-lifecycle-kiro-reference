@@ -367,3 +367,135 @@ class CredentialProcessTests(Sandbox):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewRegressionTests(Sandbox):
+    """Regressions for issues found in the pre-publication security review."""
+
+    ROLE = "arn:aws:iam::123456789012:role/balkanid-kiro-agents/kiro-agent-infra-helper"
+
+    def test_credentials_refuse_any_role_but_the_agents_own(self):
+        import balkanid_api  # noqa: F401
+        self.register()
+        kc.update_registration(AGENT, role_arn="arn:aws:iam::123456789012:role/DeveloperAdmin")
+        code, out, err = self.run_cli(agent_credentials.main, ["--agent", AGENT])
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("refusing role", err)
+
+    def test_setup_profile_rejects_foreign_role(self):
+        import setup_agent_profile
+        code, _, _ = 0, "", ""
+        with self.assertRaises(SystemExit):
+            self.run_cli(setup_agent_profile.main, ["--agent", AGENT, "--role-arn", "arn:aws:iam::1:role/admin",
+                                                    "--skip-identity-lookup"])
+        code, out, err = self.run_cli(setup_agent_profile.main, ["--agent", AGENT, "--role-arn", self.ROLE,
+                                                                 "--skip-identity-lookup"])
+        self.assertEqual(code, 0, err)
+
+    def test_unreadable_hook_input_blocks(self):
+        self.register()
+        for stdin in ("", "not json", "[]", json.dumps({"toolName": "shell", "toolInput": {"command": "cat ~/.aws/credentials"}})):
+            with self.subTest(stdin=stdin[:20]):
+                code, _, err = self.run_cli(kiro_hook.main, ["pre-tool-use", "--agent", AGENT], stdin)
+                self.assertEqual(code, kiro_hook.BLOCK)
+
+    def test_approval_must_be_agent_access_for_this_config(self):
+        self.register()
+        good = kc.registration(AGENT)["request_id"]
+        # Swap in an unrelated approved request id (for example a USER_ACCESS approval)
+        self.mock.requests["req-other"] = {"id": "req-other", "status": "approved", "requestType": "USER_ACCESS",
+                                           "metadata": {}}
+        kc.update_registration(AGENT, request_id="req-other")
+        code, _, err = self.hook("read", {"path": "README.md"})
+        self.assertEqual(code, kiro_hook.BLOCK)
+        self.assertIn("unbound", err)
+        code, _, _ = self.run_cli(register_agent.main, ["--agent", AGENT, "--verify"])
+        self.assertEqual(code, 1)
+        # An AGENT_ACCESS approval for a different config fingerprint is not enough either
+        self.mock.requests["req-old"] = {"id": "req-old", "status": "approved", "requestType": "AGENT_ACCESS",
+                                         "metadata": {"agentAccess": {"metadata": {"config_sha256": "0" * 64}}}}
+        kc.update_registration(AGENT, request_id="req-old")
+        code, _, _ = self.run_cli(register_agent.main, ["--agent", AGENT, "--verify"])
+        self.assertEqual(code, 1)
+        kc.update_registration(AGENT, request_id=good)
+        code, _, _ = self.run_cli(register_agent.main, ["--agent", AGENT, "--verify"])
+        self.assertEqual(code, 0)
+
+    def test_profile_rule_bypasses_closed(self):
+        policy = guardrails.load_policy(kc.GUARDRAILS_FILE)
+        for cmd in (f"aws s3 ls {PROFILE}; aws s3 ls", "aws s3 ls --profile balkanid-agent-infra-helper-x",
+                    "/usr/local/bin/aws s3 ls", '"aws" s3 ls', f"AWS_PROFILE=default aws s3 ls {PROFILE}",
+                    f"aws --region us-east-1 iam attach-role-policy --role-name x {PROFILE}",
+                    "cat .env", "printenv API_KEY_SECRET", "rm -rf ~/", "git push origin +main",
+                    "python3 scripts/setup_agent_profile.py --agent infra-helper --role-arn x"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(guardrails.evaluate(policy, AGENT, "shell", {"command": cmd}).outcome, "deny")
+        for tool in ("str_replace", "fs_append", "delete_file"):
+            d = guardrails.evaluate(policy, AGENT, tool, {"path": ".kiro/agents/infra-helper.json"})
+            self.assertEqual(d.rule_id, "guardrail-tampering")
+
+    def test_subagent_names_are_exact(self):
+        policy = guardrails.load_policy(kc.GUARDRAILS_FILE)
+        policy["_allowed_subagents"] = ["db-reader"]
+        self.assertEqual(guardrails.evaluate(policy, AGENT, "subagent", {"agent": "evil", "note": "db-reader"}).outcome, "deny")
+        self.assertEqual(guardrails.evaluate(policy, AGENT, "subagent", {"agent": "db-reader-admin"}).outcome, "deny")
+        self.assertEqual(guardrails.evaluate(policy, AGENT, "subagent", {"agent": "db-reader"}).outcome, "allow")
+
+    def test_grant_reason_does_not_leak_arguments(self):
+        self.register()
+        kc.update_registration(AGENT, service_account_identity_id="ident-42")
+        self.mock.next_status = "pending"
+        self.hook("shell", {"command": f"aws {PROFILE} secretsmanager get-secret-value --secret-id prod/db-password-XYZ"})
+        reason = self.mock.created[-1]["reason"]
+        self.assertNotIn("XYZ", reason)
+        self.assertIn("aws secretsmanager get-secret-value", reason)
+
+    def test_future_cache_timestamp_is_ignored(self):
+        self.register()
+        rid = kc.registration(AGENT)["request_id"]
+        self.mock.set_status(rid, "denied")
+        status = Path(os.environ["BALKANID_KIRO_STATE_DIR"]) / "status" / f"{rid}.json"
+        status.parent.mkdir(parents=True, exist_ok=True)
+        status.write_text(json.dumps({"state": "approved", "checked_at": 4102444800,
+                                      "config_sha256": kc.fingerprint(kc.load_agent(AGENT)), "request_type": "AGENT_ACCESS"}))
+        code, _, _ = self.hook("read", {"path": "README.md"})
+        self.assertEqual(code, kiro_hook.BLOCK)
+
+    def test_denied_grant_is_never_re_requested_automatically(self):
+        self.register()
+        kc.update_registration(AGENT, service_account_identity_id="ident-42")
+        cmd = {"command": f"aws secretsmanager get-secret-value --secret-id db {PROFILE}"}
+        self.mock.next_status = "pending"
+        self.hook("shell", cmd)
+        self.mock.set_status("req-2", "denied")
+        grant = Path(os.environ["BALKANID_KIRO_STATE_DIR"]) / "grants" / AGENT / "secrets-read.json"
+        data = json.loads(grant.read_text())
+        data["created_at"] -= 86400 * 2  # long ago
+        grant.write_text(json.dumps(data))
+        code, _, err = self.hook("shell", cmd)
+        self.assertEqual(code, kiro_hook.BLOCK)
+        self.assertEqual(len(self.mock.created), 2)
+        self.assertIn("clear-grant", err)
+        self.run_cli(kiro_hook.main, ["clear-grant", "--agent", AGENT, "--rule", "secrets-read"])
+        self.hook("shell", cmd)
+        self.assertEqual(len(self.mock.created), 3)
+
+    def test_session_end_only_clears_this_agent(self):
+        creds = Path(os.environ["BALKANID_KIRO_STATE_DIR"]) / "credentials"
+        creds.mkdir(parents=True, exist_ok=True)
+        (creds / f"{AGENT}.json").write_text("{}")
+        (creds / f"{AGENT}-2.json").write_text("{}")
+        self.run_cli(kiro_hook.main, ["session-end", "--agent", AGENT], "{}")
+        self.assertFalse((creds / f"{AGENT}.json").exists())
+        self.assertTrue((creds / f"{AGENT}-2.json").exists())
+
+
+class ApprovalParsingTests(unittest.TestCase):
+    def test_denied_always_wins(self):
+        import balkanid_api as api
+        self.assertEqual(api.approval_outcome("completed", "denied"), "denied")
+        self.assertEqual(api.approval_outcome("not_approved", None), "denied")
+        self.assertEqual(api.approval_outcome("unapproved", None), "denied")
+        self.assertIsNone(api.approval_outcome("pending_approval", None))
+        self.assertEqual(api.approval_outcome(None, "approved"), "approved")

@@ -27,7 +27,7 @@ data "aws_iam_policy_document" "secrets_read" {
 
 data "aws_iam_policy_document" "production_read_only" {
   statement {
-    sid       = "ReadTaggedProduction"
+    sid       = "ReadProductionResources"
     actions   = ["ec2:Describe*", "rds:Describe*", "ecs:Describe*", "ecs:List*", "lambda:Get*", "lambda:List*", "logs:Get*", "logs:FilterLogEvents", "cloudwatch:Get*"]
     resources = ["*"]
   }

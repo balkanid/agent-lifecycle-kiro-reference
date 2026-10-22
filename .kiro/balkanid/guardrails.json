@@ -6,48 +6,53 @@
   "deny": [
     {
       "id": "developer-credentials",
-      "message": "Agents may not read, export or reuse the developer's AWS credentials. They run as their own BalkanID-issued identity.",
+      "message": "Agents may not read, export or reuse the developer's AWS credentials, profiles, or the BalkanID API key. They run as their own BalkanID-issued identity.",
       "patterns": [
         "\\.aws/(credentials|config|sso/cache|cli/cache)",
-        "aws\\s+configure\\s+(export-credentials|get|list|set)",
-        "aws\\s+sts\\s+get-session-token",
-        "aws\\s+sso\\s+(login|get-role-credentials)",
-        "AWS_(ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN)\\s*=",
-        "(^|\\s)(printenv|env)(\\s*$|\\s*\\|)"
+        "aws\\b[^;|&\\n]*?\\bconfigure\\s+(export-credentials|get|list|set)",
+        "aws\\b[^;|&\\n]*?\\bsts\\s+get-session-token",
+        "aws\\b[^;|&\\n]*?\\bsso\\s+(login|get-role-credentials)",
+        "AWS_(ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN|PROFILE|DEFAULT_PROFILE|CONFIG_FILE|SHARED_CREDENTIALS_FILE)\\s*=",
+        "(^|[\\s;&|(])printenv\\b",
+        "(^|[\\s;&|(])env(\\s*$|\\s*[|;&>])",
+        "\\bset\\s*(\\||$)",
+        "API_KEY_(ID|SECRET)",
+        "(^|[\\s/'\\\"=<])\\.env(\\s|$|['\\\";|&])",
+        "\\.cache/balkanid-kiro"
       ]
     },
     {
       "id": "privilege-escalation",
       "message": "Agents may not change IAM, assume other roles or touch the organization. Request access in BalkanID instead.",
       "patterns": [
-        "aws\\s+iam\\s+(create|attach|put|update|add|delete|detach|remove|pass|tag|untag)-",
-        "aws\\s+sts\\s+assume-role",
-        "aws\\s+organizations\\s+",
-        "aws\\s+sso-admin\\s+",
-        "aws\\s+identitystore\\s+"
+        "aws\\b[^;|&\\n]*?\\biam\\s+(create|attach|put|update|add|delete|detach|remove|pass|tag|untag)-",
+        "aws\\b[^;|&\\n]*?\\bsts\\s+assume-role",
+        "aws\\b[^;|&\\n]*?\\borganizations\\s+",
+        "aws\\b[^;|&\\n]*?\\bsso-admin\\s+",
+        "aws\\b[^;|&\\n]*?\\bidentitystore\\s+"
       ]
     },
     {
       "id": "guardrail-tampering",
-      "message": "Agents may not modify their own configuration, hooks or BalkanID registration.",
-      "tools": ["write", "fs_write", "fswrite", "shell", "execute_bash", "execute_cmd"],
+      "message": "Agents may not read or change their own configuration, hooks, BalkanID registration, guardrail scripts or credential cache.",
       "patterns": [
-        "\\.kiro/(agents|hooks|balkanid)/",
-        "scripts/(kiro_hook|guardrails|agent_credentials)\\.py"
+        "\\.kiro/(agents|hooks|balkanid)\\b",
+        "registrations\\.json",
+        "scripts/(kiro_hook|guardrails|kiro_config|agent_credentials|setup_agent_profile|register_agent|service_account_gate|balkanid_api|trigger_sync)\\.py",
+        "\\.cache/balkanid-kiro"
       ]
     },
     {
       "id": "destructive-operations",
       "message": "Destructive infrastructure and data operations are blocked for agents.",
       "patterns": [
-        "rm\\s+-[a-z]*r[a-z]*f?\\s+(/|~|\\$HOME)(\\s|$)",
+        "\\brm\\s+(-[a-zA-Z]*\\s+)*(-[a-zA-Z]*[rR][a-zA-Z]*)\\s+(-[a-zA-Z]*\\s+)*(/|~|\\$HOME)(/|\\*)?(\\s|$)",
         "terraform\\s+destroy",
         "terraform\\s+apply\\b.*-auto-approve",
-        "aws\\s+s3\\s+rb\\b",
-        "aws\\s+s3\\s+rm\\b.*--recursive",
-        "aws\\s+(rds|dynamodb|ec2|eks|lambda|cloudformation)\\s+delete-",
-        "aws\\s+ec2\\s+terminate-instances",
-        "git\\s+push\\b.*(--force|\\s-f\\b)"
+        "aws\\b[^;|&\\n]*?\\bs3\\s+rb\\b",
+        "aws\\b[^;|&\\n]*?\\bs3\\s+rm\\b.*--recursive",
+        "aws\\b[^;|&\\n]*?\\b(rds|dynamodb|ec2|eks|lambda|cloudformation|ecr|ecs|kms|secretsmanager)\\s+(delete|deregister|schedule-key-deletion|terminate)-?",
+        "git\\s+push\\b.*(--force|\\s-f\\b|\\s\\+[\\w./-]+)"
       ]
     }
   ],
@@ -60,7 +65,10 @@
         "ssm\\s+get-parameters?\\b.*--with-decryption",
         "kms\\s+decrypt"
       ],
-      "grant": { "type": "policy", "source_name": "BalkanIDAgentSecretsRead" },
+      "grant": {
+        "type": "policy",
+        "source_name": "BalkanIDAgentSecretsRead"
+      },
       "duration_seconds": 900
     },
     {
@@ -69,7 +77,10 @@
       "patterns": [
         "aws\\s+.*\\b(prod|production)\\b"
       ],
-      "grant": { "type": "policy", "source_name": "BalkanIDAgentProductionReadOnly" },
+      "grant": {
+        "type": "policy",
+        "source_name": "BalkanIDAgentProductionReadOnly"
+      },
       "duration_seconds": 900
     },
     {
@@ -78,7 +89,10 @@
       "patterns": [
         "s3://[^\\s]*(customer|pii|cardholder)"
       ],
-      "grant": { "type": "policy", "source_name": "BalkanIDAgentCustomerDataRead" },
+      "grant": {
+        "type": "policy",
+        "source_name": "BalkanIDAgentCustomerDataRead"
+      },
       "duration_seconds": 900
     }
   ]

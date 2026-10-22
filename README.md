@@ -2,7 +2,7 @@
 
 Reference implementation for governing [Kiro](https://kiro.dev) custom agents with **BalkanID**, so that an agent a developer creates does **not** inherit that developer's permissions.
 
-Companion to [agent-lifecycle-terraform-reference](https://github.com/balkanid/agent-lifecycle-terraform-reference) (AWS Bedrock) and [agent-lifecycle-microsoft-copilot-reference](https://github.com/balkanid/agent-lifecycle-microsoft-copilot-reference). Same Public API, same fail-closed approval gate; here the provisioning plane is a Kiro agent config and a dedicated IAM role.
+Companion to [agent-lifecycle-terraform-reference](https://github.com/balkanid/agent-lifecycle-terraform-reference) (AWS Bedrock creation gate) and [agent-guardrails-bedrock-reference](https://github.com/balkanid/agent-guardrails-bedrock-reference) (the same guardrails for developer-created Bedrock agents). Same Public API, same fail-closed approval gate; here the provisioning plane is a Kiro agent config and a dedicated IAM role.
 
 ## The control gap
 
@@ -17,7 +17,7 @@ Kiro agents run with the developer's environment. Any AWS CLI call or AWS MCP se
 | **Auto-deny guardrails** | A Kiro `PreToolUse` hook blocks credential theft, IAM and org changes, destructive commands, guardrail tampering, and any AWS CLI call not made as the agent. |
 | **Step-up approval for sensitive access** | Secrets, production and customer data trigger a time-bound `SERVICE_ACCOUNT_ASSIGNMENT` grant on the agent's own identity. Mark those grants sensitive in BalkanID and approvers must complete step-up MFA. |
 | **Subagents stay inside their parent** | Children are registered with `--parent`, share the parent's permissions boundary, and are the only agents the parent may spawn. |
-| **Ephemeral by default** | Credentials expire in 15 minutes and are deleted on `SessionEnd`; grants expire with their approved duration. |
+| **Ephemeral by default** | Credentials expire in 15 minutes and are deleted on `SessionEnd` (CLI); grants expire with their approved duration. |
 | **Review before merge** | The `Agent approval` workflow is a required PR check: a changed agent merges only with a live, matching approval. |
 
 ```
@@ -94,7 +94,7 @@ python3 scripts/preflight.py --agent infra-helper
    python3 scripts/service_account_gate.py --agent infra-helper
    cd terraform/grant-policies && terraform init && terraform apply      # once per account
    cd ../agent-role && terraform init && terraform apply \
-     -var="aws_account_id=123456789012" -var="agent_name=infra-helper" \
+     -var="agent_name=infra-helper" \
      -var='developer_principal_arns=["arn:aws:iam::123456789012:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_Developer_abc123"]'
    cd ../.. && python3 scripts/trigger_sync.py
    ```
@@ -116,7 +116,7 @@ python3 scripts/preflight.py --agent infra-helper
    | `aws s3 ls --profile balkanid-agent-infra-helper` | Allowed, as the agent role, for 15 minutes |
    | `cat ~/.aws/credentials` | Blocked: developer credentials |
    | `aws iam attach-role-policy ...` | Blocked: privilege escalation (and denied by the boundary) |
-   | `aws secretsmanager get-secret-value ...` | Held: BalkanID request raised; approver completes step-up; retry succeeds inside the window |
+   | `aws secretsmanager get-secret-value ...` | Held: BalkanID request raised; approver completes step-up; retry succeeds inside the window. A denial is final until the owner runs `python3 scripts/kiro_hook.py clear-grant --agent infra-helper --rule secrets-read` |
    | Edit `.kiro/agents/infra-helper.json` | Blocked: guardrail tampering |
 
 ## Adding another agent

@@ -21,7 +21,9 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -32,50 +34,53 @@ import guardrails  # noqa: E402
 import kiro_config as kc  # noqa: E402
 
 BLOCK = 2  # any non-zero blocks a Kiro PreToolUse tool call; 2 is also the Claude Code convention
-DENIAL_COOLDOWN_SECONDS = 600  # after a denial, do not re-raise the same request for 10 minutes
 
 
-def read_event() -> dict:
+def read_event():
+    """Parsed hook JSON, or None if stdin is empty or not JSON (callers fail closed)."""
     raw = sys.stdin.read() if not sys.stdin.isatty() else ""
     if not raw.strip():
-        return {}
+        return None
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        return {}
+        return None
 
 
 def hook_api_defaults() -> None:
-    # Hooks run inline with the agent, so keep network waits short.
+    # Hooks run inline with the agent, so keep network waits short. Worst case for a sensitive
+    # call is two API calls x 2 attempts x 8s plus backoff, inside the 60s hook timeout.
     os.environ.setdefault("GQL_MAX_RETRIES", "2")
     os.environ.setdefault("GQL_RETRY_BACKOFF_SECONDS", "1")
-    os.environ.setdefault("GQL_TIMEOUT_SECONDS", "10")
+    os.environ.setdefault("GQL_TIMEOUT_SECONDS", "8")
 
 
 def _json_load(path: Path) -> dict:
     try:
         with open(path, encoding="utf-8") as fh:
-            return json.load(fh)
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
     except (OSError, json.JSONDecodeError):
         return {}
 
 
 def _json_save(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    tmp = path.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8") as fh:
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".", suffix=".tmp")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(data, fh)
     os.replace(tmp, path)
 
 
 def audit(agent: str, event: dict, outcome: str, rule: str = "", request_id: str = "") -> None:
+    event = event if isinstance(event, dict) else {}
     tool_input = json.dumps(event.get("tool_input"), sort_keys=True, default=str)
     record = {
         "ts": int(time.time()),
         "agent": agent,
-        "session_id": event.get("session_id", ""),
-        "event": event.get("hook_event_name", ""),
-        "tool": event.get("tool_name", ""),
+        "session_id": str(event.get("session_id", "")),
+        "event": str(event.get("hook_event_name", "")),
+        "tool": str(event.get("tool_name", "")),
         "input_sha256": hashlib.sha256(tool_input.encode()).hexdigest(),
         "outcome": outcome,
         "rule": rule,
@@ -88,22 +93,54 @@ def audit(agent: str, event: dict, outcome: str, rule: str = "", request_id: str
         pass
 
 
-def cached_request_state(request_id: str, cache_seconds: int, max_stale_seconds: int) -> str:
-    """Live BalkanID status with a short cache. Returns approved|denied|pending|missing|unknown."""
+def _bound(node: dict, request_type: str, config_sha256: str) -> bool:
+    """Is this approved request really the one we think it is?"""
+    if not api.request_type_is(node, request_type):
+        return False
+    if config_sha256:
+        return config_sha256 in [str(v) for v in api.find_in_metadata(node.get("metadata"), "config_sha256")]
+    return True
+
+
+def cached_request_state(
+    request_id: str,
+    cache_seconds: int,
+    max_stale_seconds: int,
+    *,
+    request_type: str,
+    config_sha256: str = "",
+) -> str:
+    """Live BalkanID status with a short cache.
+
+    Returns approved | denied | pending | missing | unbound | unknown. "unbound" means the
+    request exists and is approved but is not the expected type, or does not carry the
+    expected config fingerprint, so it cannot vouch for this agent.
+    """
     path = kc.state_dir() / "status" / f"{request_id}.json"
     cached = _json_load(path)
     now = time.time()
-    if cached and now - cached.get("checked_at", 0) < cache_seconds:
+    checked_at = cached.get("checked_at", 0)
+    trusted_cache = (
+        cached
+        and isinstance(checked_at, (int, float))
+        and checked_at <= now + 5  # a timestamp from the future is forged or broken: ignore it
+        and cached.get("config_sha256", "") == config_sha256
+        and cached.get("request_type", "") == request_type
+    )
+    if trusted_cache and now - checked_at < cache_seconds:
         return cached.get("state", "unknown")
     try:
         url, key_id, secret = api.api_client_from_env()
-        state = api.request_state(url, key_id, secret, request_id)
+        state, node = api.request_check(url, key_id, secret, request_id)
     except SystemExit as exc:
         api.log_stderr(f"BalkanID status check failed: {exc}")
-        if cached and cached.get("state") == "approved" and now - cached.get("checked_at", 0) < max_stale_seconds:
+        if trusted_cache and cached.get("state") == "approved" and now - checked_at < max_stale_seconds:
             return "approved"
         return "unknown"
-    _json_save(path, {"state": state, "checked_at": now})
+    if state == "approved" and not _bound(node, request_type, config_sha256):
+        if api.env_optional("BALKANID_ALLOW_UNBOUND_APPROVAL").lower() not in ("1", "true", "yes"):
+            state = "unbound"
+    _json_save(path, {"state": state, "checked_at": now, "config_sha256": config_sha256, "request_type": request_type})
     return state
 
 
@@ -119,15 +156,18 @@ def registration_check(agent: str, policy: dict) -> tuple[bool, str, dict]:
         ), reg
     if reg.get("config_sha256") != current:
         return False, (
-            f"Agent {agent!r} changed since BalkanID approved it (approved {reg.get('config_sha256', '')[:12]}, "
+            f"Agent {agent!r} changed since BalkanID approved it (approved {str(reg.get('config_sha256', ''))[:12]}, "
             f"now {current[:12]}). Re-register the new config before using it."
         ), reg
     cache_s = int(policy.get("status_cache_seconds", 300))
     max_stale = int(api.env_optional("BALKANID_MAX_STALE_SECONDS", "3600"))
-    state = cached_request_state(reg["request_id"], cache_s, max_stale)
+    state = cached_request_state(reg["request_id"], cache_s, max_stale,
+                                 request_type="AGENT_ACCESS", config_sha256=current)
     if state != "approved":
+        hint = (" The recorded request is not an AGENT_ACCESS approval for this exact config."
+                if state == "unbound" else "")
         return False, (
-            f"BalkanID approval for agent {agent!r} is {state} (request {reg['request_id']}). "
+            f"BalkanID approval for agent {agent!r} is {state} (request {reg['request_id']}).{hint} "
             "Tools stay blocked until it is approved."
         ), reg
     return True, "", reg
@@ -138,33 +178,52 @@ def allowed_subagents(agent: str) -> list[str]:
     return sorted(name for name, entry in agents.items() if entry.get("parent") == agent)
 
 
+def redacted_summary(tool_name: str, tool_input) -> str:
+    """What to show an approver without leaking arguments (which may hold secrets)."""
+    for text in guardrails.flatten_strings(tool_input):
+        m = re.search(r"\baws\b(?:\s+--?[\w-]+(?:[ =][^\s-][^\s]*)?)*\s+([a-z0-9-]+)\s+([a-z0-9-]+)", text)
+        if m:
+            return f"{tool_name}: aws {m.group(1)} {m.group(2)}"
+    return f"{tool_name}"
+
+
+def grant_path(agent: str, rule_id: str) -> Path:
+    return kc.state_dir() / "grants" / agent / f"{rule_id}.json"
+
+
 def sensitive_check(agent: str, reg: dict, decision: guardrails.Decision, event: dict, policy: dict) -> tuple[bool, str, str]:
-    """Allow only while a BalkanID grant for this rule is approved and unexpired."""
-    path = kc.state_dir() / "grants" / agent / f"{decision.rule_id}.json"
+    """Allow only while a BalkanID grant for this rule is approved and inside its window."""
+    path = grant_path(agent, decision.rule_id)
     grant = _json_load(path)
     now = time.time()
 
     if grant.get("request_id"):
-        approved_at = grant.get("approved_at")
-        if approved_at and now < approved_at + grant.get("duration_seconds", 0):
-            return True, "", grant["request_id"]
-        if not approved_at:
-            state = cached_request_state(grant["request_id"], 0, 0)  # always live while pending
-            if state == "approved":
-                grant["approved_at"] = now
+        rid = str(grant["request_id"])
+        created_at = float(grant.get("created_at") or 0)
+        duration = int(grant.get("duration_seconds") or 0)
+        # The window is measured from when the request was raised, so the hook never allows
+        # longer than BalkanID does. BalkanID also removes the grant policy at the end.
+        window_end = created_at + duration
+        # Re-check live while pending; once approved, a one-minute cache is enough.
+        cache_s = 60 if grant.get("approved_seen") else 0
+        state = cached_request_state(rid, cache_s, 0, request_type="SERVICE_ACCOUNT_ASSIGNMENT")
+        if state == "approved" and now < window_end:
+            if not grant.get("approved_seen"):
+                grant["approved_seen"] = now
                 _json_save(path, grant)
-                return True, "", grant["request_id"]
-            if state in ("pending", "unknown"):
-                return False, (
-                    f"{decision.message} Waiting on BalkanID request {grant['request_id']} ({state}). "
-                    "Retry after the approver completes step-up verification and approves."
-                ), grant["request_id"]
-            if state == "denied" and now - grant.get("created_at", 0) < DENIAL_COOLDOWN_SECONDS:
-                return False, (
-                    f"{decision.message} BalkanID denied request {grant['request_id']}. "
-                    "Do not retry; tell the user the access was refused."
-                ), grant["request_id"]
-        # expired, missing, or denied long enough ago: ask again
+            return True, "", rid
+        if state in ("pending", "unknown") and now < window_end:
+            return False, (
+                f"{decision.message} Waiting on BalkanID request {rid} ({state}). "
+                "Retry after the approver completes step-up verification and approves."
+            ), rid
+        if state in ("denied", "missing", "unbound"):
+            return False, (
+                f"{decision.message} BalkanID request {rid} is {state}. Do not retry; tell the user. "
+                f"The owner can clear it with: python3 scripts/kiro_hook.py clear-grant --agent {agent} "
+                f"--rule {decision.rule_id}"
+            ), rid
+        # approved or pending, but the window has passed: raise a fresh request below
 
     identity_id = reg.get("service_account_identity_id")
     integration_id = reg.get("integration_id") or api.env_optional("INTEGRATION_ID")
@@ -174,10 +233,10 @@ def sensitive_check(agent: str, reg: dict, decision: guardrails.Decision, event:
             "run scripts/setup_agent_profile.py first."
         ), ""
 
-    command_preview = " ".join(guardrails.flatten_strings(event.get("tool_input")))[:300]
     inp = {
         "requestType": "SERVICE_ACCOUNT_ASSIGNMENT",
-        "reason": f"Kiro agent {agent} needs '{decision.rule_id}' for: {command_preview}",
+        "reason": f"Kiro agent {agent} needs '{decision.rule_id}' "
+                  f"({redacted_summary(str(event.get('tool_name', '')), event.get('tool_input'))})",
         "duration": decision.duration_seconds,
         "payload": {
             "entity": {
@@ -210,7 +269,12 @@ def sensitive_check(agent: str, reg: dict, decision: guardrails.Decision, event:
     ), request_id
 
 
-def cmd_pre_tool_use(agent: str, event: dict) -> int:
+def cmd_pre_tool_use(agent: str, event) -> int:
+    if not isinstance(event, dict) or not isinstance(event.get("tool_name"), str) or not event["tool_name"].strip():
+        audit(agent, event if isinstance(event, dict) else {}, "blocked", "unrecognized-input")
+        print("[BalkanID] guardrail could not read the tool call from Kiro; blocking.", file=sys.stderr)
+        return BLOCK
+
     policy = guardrails.load_policy(kc.GUARDRAILS_FILE)
     ok, why, reg = registration_check(agent, policy)
     if not ok:
@@ -219,7 +283,7 @@ def cmd_pre_tool_use(agent: str, event: dict) -> int:
         return BLOCK
 
     policy["_allowed_subagents"] = allowed_subagents(agent)
-    decision = guardrails.evaluate(policy, agent, event.get("tool_name", ""), event.get("tool_input"))
+    decision = guardrails.evaluate(policy, agent, event["tool_name"], event.get("tool_input"))
 
     if decision.outcome == "deny":
         audit(agent, event, "denied", decision.rule_id)
@@ -256,33 +320,50 @@ def cmd_session_start(agent: str, event: dict) -> int:
     return 0
 
 
-def cmd_session_end(agent: str, event: dict) -> int:
+def cmd_session_end(agent: str, event) -> int:
     removed = 0
-    for path in (kc.state_dir() / "credentials").glob(f"{agent}*.json"):
+    path = kc.state_dir() / "credentials" / f"{agent}.json"
+    if path.exists():
         try:
             path.unlink()
-            removed += 1
+            removed = 1
         except OSError:
             pass
-    audit(agent, event, "session-end", request_id=str(removed))
+    audit(agent, event if isinstance(event, dict) else {}, "session-end", request_id=str(removed))
     print(f"BalkanID: cleared {removed} cached credential set(s) for agent '{agent}'.")
+    return 0
+
+
+def cmd_clear_grant(agent: str, rule: str) -> int:
+    """Human-only: forget a denied or stuck sensitive-grant request so the hook may ask again."""
+    path = grant_path(agent, rule)
+    if path.exists():
+        path.unlink()
+        print(f"cleared grant state for {agent}/{rule}")
+    else:
+        print(f"no grant state for {agent}/{rule}")
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("mode", choices=["session-start", "pre-tool-use", "session-end"])
+    parser.add_argument("mode", choices=["session-start", "pre-tool-use", "session-end", "clear-grant"])
     parser.add_argument("--agent", required=True)
+    parser.add_argument("--rule", default="", help="clear-grant: the sensitive rule id")
     args = parser.parse_args(argv)
 
     api.load_dotenv()
     hook_api_defaults()
+    if args.mode == "clear-grant":
+        if not args.rule:
+            parser.error("clear-grant needs --rule")
+        return cmd_clear_grant(args.agent, args.rule)
     event = read_event()
     try:
         if args.mode == "pre-tool-use":
             return cmd_pre_tool_use(args.agent, event)
         if args.mode == "session-start":
-            return cmd_session_start(args.agent, event)
+            return cmd_session_start(args.agent, event if isinstance(event, dict) else {})
         return cmd_session_end(args.agent, event)
     except SystemExit as exc:
         # Anything unexpected (missing config, bad JSON) blocks rather than allows.

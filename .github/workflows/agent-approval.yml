@@ -1,14 +1,17 @@
 name: Agent approval
 
-# Required status check for pull requests that add or change a Kiro agent.
-# Passes only when every changed agent config matches a live, approved BalkanID registration.
-# Mark "Agent approval / verify" as required in branch protection.
+# Required status check: a pull request may only change a Kiro agent if that exact config has a
+# live AGENT_ACCESS approval in BalkanID.
+#
+# Hardening:
+# - Runs on every PR (no path filter) so the required check always reports; it passes quickly
+#   when no agent changed.
+# - Verifies with scripts from the BASE branch. The PR's own scripts never run with secrets,
+#   so a PR cannot edit the verifier to pass or read the API key.
+# - The agent-approval environment should require reviewers; fork PRs receive no secrets and fail closed.
 
 on:
   pull_request:
-    paths:
-      - ".kiro/agents/**"
-      - ".kiro/balkanid/**"
 
 permissions:
   contents: read
@@ -18,11 +21,21 @@ jobs:
     name: verify
     runs-on: ubuntu-latest
     environment: agent-approval
-    # Fork PRs never receive secrets; they fail closed here and need a maintainer re-run.
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out base branch (trusted verifier)
+        uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+          persist-credentials: false
+
+      - name: Check out pull request (data only)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pr
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -33,18 +46,25 @@ jobs:
           BALKANID_PUBLIC_API_URL: ${{ secrets.BALKANID_PUBLIC_API_URL }}
           API_KEY_ID: ${{ secrets.BALKANID_API_KEY_ID }}
           API_KEY_SECRET: ${{ secrets.BALKANID_API_KEY_SECRET }}
+          BALKANID_SKIP_DOTENV: "1"
+          BALKANID_KIRO_ROOT: ${{ github.workspace }}/pr
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          changed="$(git diff --name-only "$BASE_SHA"...HEAD -- .kiro/agents | grep -E '\.json$' || true)"
+          cd pr
+          changed="$(git diff --name-only "$BASE_SHA"...HEAD -- .kiro/agents .kiro/balkanid | sort -u)"
           if [ -z "$changed" ]; then
-            # registrations.json changed alone: verify every agent still on disk
-            changed="$(ls .kiro/agents/*.json 2>/dev/null || true)"
+            echo "No Kiro agent changes; nothing to verify."
+            exit 0
+          fi
+          agents="$(printf '%s\n' "$changed" | grep -E '^\.kiro/agents/[^/]+\.json$' | xargs -r -n1 basename | sed 's/\.json$//' || true)"
+          if printf '%s\n' "$changed" | grep -q '^\.kiro/balkanid/'; then
+            # Registrations or guardrails changed: re-verify every agent on disk.
+            agents="$(ls .kiro/agents/*.json 2>/dev/null | xargs -r -n1 basename | sed 's/\.json$//')"
           fi
           status=0
-          for f in $changed; do
-            [ -f "$f" ] || continue   # deleted agents need no approval
-            name="$(basename "$f" .json)"
-            python3 scripts/register_agent.py --agent "$name" --verify || status=1
+          for name in $agents; do
+            [ -f ".kiro/agents/$name.json" ] || continue   # deleted agents need no approval
+            python3 "$GITHUB_WORKSPACE/base/scripts/register_agent.py" --agent "$name" --verify || status=1
           done
           exit "$status"

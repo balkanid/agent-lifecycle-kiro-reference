@@ -21,10 +21,13 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-SHELL_TOOLS = {"shell", "execute_bash", "execute_cmd", "executebash"}
+SHELL_TOOLS = {"shell", "execute_bash", "execute_cmd", "executebash", "execute_pwsh", "executepwsh"}
 SUBAGENT_TOOLS = {"subagent", "use_subagent", "delegate"}
+SUBAGENT_NAME_KEYS = ("agent", "agent_name", "agentName", "name", "subagent", "subagent_name", "target_agent")
 
-AWS_CLI_RE = re.compile(r"(^|[\s;&|(`$])aws\s+[a-z0-9-]+", re.IGNORECASE)
+# An AWS CLI invocation anywhere in a command segment: bare, by path, or quoted.
+AWS_CLI_RE = re.compile(r"""(^|[\s;&|(`$/'"])aws(\.exe)?['"]?\s+\S""", re.IGNORECASE)
+SEGMENT_SPLIT_RE = re.compile(r"\|\||&&|[;|&\n]|\$\(|`")
 
 
 @dataclass
@@ -66,6 +69,21 @@ def flatten_strings(value) -> list[str]:
     return out
 
 
+def subagent_names(tool_input) -> set[str]:
+    """Exact agent names a subagent/delegate call targets (looks in name-like fields only)."""
+    names: set[str] = set()
+    if isinstance(tool_input, dict):
+        for key, value in tool_input.items():
+            if key in SUBAGENT_NAME_KEYS and isinstance(value, str):
+                names.add(value.strip())
+            elif isinstance(value, (dict, list)):
+                names |= subagent_names(value)
+    elif isinstance(tool_input, list):
+        for value in tool_input:
+            names |= subagent_names(value)
+    return names
+
+
 def _tool_matches(rule: dict, tool: str) -> bool:
     tools = [t.lower() for t in rule.get("tools") or []]
     if not tools:
@@ -100,28 +118,26 @@ def evaluate(policy: dict, agent: str, tool_name: str, tool_input) -> Decision:
 
     if policy.get("require_agent_profile_for_aws_cli", True) and tool in SHELL_TOOLS:
         profile = f"balkanid-agent-{agent}"
+        own_profile = re.compile(rf"""--profile(\s+|=)['"]?{re.escape(profile)}['"]?(\s|$)""")
         for text in haystack:
-            if AWS_CLI_RE.search(text) and not re.search(rf"--profile[ =]{re.escape(profile)}\b", text):
-                return Decision(
-                    "deny",
-                    "agent-identity-required",
-                    f"AWS CLI calls from this agent must run as its own identity: add --profile {profile}. "
-                    "The developer's credentials are not available to agents.",
-                )
+            for segment in SEGMENT_SPLIT_RE.split(text):
+                if AWS_CLI_RE.search(segment) and not own_profile.search(segment):
+                    return Decision(
+                        "deny",
+                        "agent-identity-required",
+                        f"Every AWS CLI call from this agent must run as its own identity: add --profile {profile} "
+                        "to each aws command. The developer's credentials are not available to agents.",
+                    )
 
     if tool in SUBAGENT_TOOLS:
         allowed = set(policy.get("_allowed_subagents") or [])
-        if not allowed:
+        requested = subagent_names(tool_input)
+        if not allowed or not requested or not requested <= allowed:
             return Decision(
                 "deny",
                 "subagent-not-registered",
-                "this agent has no approved subagents in BalkanID; register the child agent with --parent",
-            )
-        if not any(name in text for text in haystack for name in allowed):
-            return Decision(
-                "deny",
-                "subagent-not-registered",
-                f"subagents must be BalkanID-registered children of {agent!r}: {sorted(allowed)}",
+                f"subagents must be BalkanID-registered children of {agent!r} named exactly in the call; "
+                f"approved children: {sorted(allowed) or 'none'}",
             )
 
     for rule in policy.get("sensitive", []):

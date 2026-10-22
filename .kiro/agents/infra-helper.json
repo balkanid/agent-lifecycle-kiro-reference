@@ -31,14 +31,14 @@
       "description": "Confirm this exact agent config is approved in BalkanID and brief the agent on its identity.",
       "trigger": "SessionStart",
       "action": { "type": "command", "command": "python3 scripts/kiro_hook.py session-start --agent infra-helper" },
-      "timeout": 30
+      "timeout": 60
     },
     {
       "name": "balkanid-guardrails",
       "description": "Every tool call: registration check, auto-deny rules, own-identity rule, step-up approval for sensitive access.",
       "trigger": "PreToolUse",
       "action": { "type": "command", "command": "python3 scripts/kiro_hook.py pre-tool-use --agent infra-helper" },
-      "timeout": 30
+      "timeout": 60
     },
     {
       "name": "balkanid-session-end",

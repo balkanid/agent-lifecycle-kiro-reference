@@ -21,8 +21,15 @@ import sys
 
 import balkanid_api as api
 import kiro_config as kc
+from kiro_hook import _bound
 
 AGENT_TYPE = "kiro"
+
+
+def expected_role_arn(agent: str) -> str:
+    """terraform/agent-role always names the role this way, so it is known before it exists."""
+    account = api.env_optional("AWS_ACCOUNT_ID")
+    return f"arn:aws:iam::{account}:role{kc.ROLE_PATH}kiro-agent-{agent}" if account else ""
 
 
 def build_input(agent: str, config: dict, sha: str, owner: str, args: argparse.Namespace) -> dict:
@@ -51,7 +58,7 @@ def build_input(agent: str, config: dict, sha: str, owner: str, args: argparse.N
     integration = api.env_optional("INTEGRATION_ID")
     if integration:
         agent_access["integrationId"] = integration
-    role_arn = args.role_arn or api.env_optional("AGENT_ROLE_ARN")
+    role_arn = args.role_arn or api.env_optional("AGENT_ROLE_ARN") or expected_role_arn(agent)
     if role_arn:
         agent_access["intendedIamRoleArn"] = role_arn
 
@@ -73,7 +80,9 @@ def verify(agent: str, sha: str) -> int:
         api.log_stderr(f"{agent}: config changed since approval; run register_agent.py again")
         return 1
     url, key_id, secret = api.api_client_from_env()
-    state = api.request_state(url, key_id, secret, reg["request_id"])
+    state, node = api.request_check(url, key_id, secret, reg["request_id"])
+    if state == "approved" and not _bound(node, "AGENT_ACCESS", sha):
+        state = "unbound (not an AGENT_ACCESS approval for this exact config)"
     api.log_stderr(f"{agent}: request {reg['request_id']} is {state}")
     return 0 if state == "approved" else 1
 
@@ -122,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
         owner=owner,
         parent=args.parent or None,
         integration_id=api.env_optional("INTEGRATION_ID") or None,
-        role_arn=(args.role_arn or api.env_optional("AGENT_ROLE_ARN")) or None,
+        role_arn=None,  # recorded only by setup_agent_profile.py, after the role exists
     )
     api.log_stderr(f"request_id={request_id} recorded in {kc.REGISTRATIONS_FILE.relative_to(kc.ROOT)}")
 

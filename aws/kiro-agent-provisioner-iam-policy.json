@@ -5,7 +5,6 @@
       "Sid": "ManageAgentRolesOnlyUnderTheAgentPath",
       "Effect": "Allow",
       "Action": [
-        "iam:CreateRole",
         "iam:GetRole",
         "iam:UpdateRole",
         "iam:DeleteRole",
@@ -17,11 +16,23 @@
         "iam:DetachRolePolicy",
         "iam:ListAttachedRolePolicies",
         "iam:ListRolePolicies",
-        "iam:ListInstanceProfilesForRole",
-        "iam:PutRolePermissionsBoundary",
-        "iam:DeleteRolePermissionsBoundary"
+        "iam:ListInstanceProfilesForRole"
       ],
       "Resource": "arn:aws:iam::*:role/balkanid-kiro-agents/*"
+    },
+    {
+      "Sid": "CreateAgentRolesOnlyWithTheAgentBoundary",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:PutRolePermissionsBoundary"
+      ],
+      "Resource": "arn:aws:iam::*:role/balkanid-kiro-agents/*",
+      "Condition": {
+        "ArnLike": {
+          "iam:PermissionsBoundary": "arn:aws:iam::*:policy/balkanid-kiro-agents/kiro-agent-boundary-*"
+        }
+      }
     },
     {
       "Sid": "ManageBoundaryAndGrantPolicies",
@@ -42,7 +53,9 @@
     {
       "Sid": "LookUpPolicies",
       "Effect": "Allow",
-      "Action": ["iam:ListPolicies"],
+      "Action": [
+        "iam:ListPolicies"
+      ],
       "Resource": "*"
     }
   ]

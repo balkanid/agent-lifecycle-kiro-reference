@@ -16,11 +16,11 @@ For non-security bugs or documentation fixes, use GitHub Issues.
 
 | Location | Guidance |
 |---|---|
-| Git | Never commit `.env`, `*.tfvars` or Terraform state. `.kiro/balkanid/registrations.json` holds request ids and hashes only, and is meant to be committed. |
-| Developer machine | Agent credentials are cached in `~/.cache/balkanid-kiro/credentials` with mode 0600 and deleted by the SessionEnd hook. They expire after `AGENT_CREDENTIAL_SECONDS` regardless. |
-| Audit log | `~/.cache/balkanid-kiro/audit.jsonl` stores a SHA-256 of each tool input, never the input itself. |
-| GitHub Actions | Store the BalkanID URL and API key as environment **secrets** on `agent-approval`. Fork pull requests do not receive them and fail closed. |
-| AWS | Scope the Terraform principal to [`aws/kiro-agent-provisioner-iam-policy.json`](aws/kiro-agent-provisioner-iam-policy.json), which can only manage roles and policies under `/balkanid-kiro-agents/`. |
+| Git | Never commit `.env`, `*.tfvars` or Terraform state. `.kiro/balkanid/registrations.json` is meant to be committed; it holds BalkanID request ids, config fingerprints, the owner's email, and after setup the agent role ARN and its BalkanID identity id. No secrets. |
+| Developer machine | Agent credentials are cached in `~/.cache/balkanid-kiro/credentials` with mode 0600, deleted by the SessionEnd hook where Kiro supports it, and expire after `AGENT_CREDENTIAL_SECONDS` regardless. Agents are denied access to this directory, to `.env` and to the BalkanID API key. |
+| Audit log and approvers | `~/.cache/balkanid-kiro/audit.jsonl` stores a SHA-256 of each tool input, never the input itself. Grant requests sent to BalkanID name the rule and the AWS service and operation only, never command arguments. |
+| GitHub Actions | Store the BalkanID URL and API key as environment **secrets** on `agent-approval` and require reviewers on that environment. The workflow runs the verifier from the base branch, never the pull request's scripts. Fork pull requests do not receive secrets and fail closed. |
+| AWS | Scope the Terraform principal to [`aws/kiro-agent-provisioner-iam-policy.json`](aws/kiro-agent-provisioner-iam-policy.json). It can only manage roles and policies under `/balkanid-kiro-agents/`, can only create roles that carry an agent permissions boundary, and cannot remove a boundary. |
 
 ## What the hooks can and cannot guarantee
 

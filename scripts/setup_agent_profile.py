@@ -57,6 +57,10 @@ def main(argv: list[str] | None = None) -> int:
 
     api.load_dotenv()
     kc.load_agent(args.agent)
+    if not kc.role_arn_ok(args.agent, args.role_arn):
+        raise SystemExit(
+            f"--role-arn must be the agent's own role: arn:aws:iam::<account>:role{kc.ROLE_PATH}kiro-agent-{args.agent}"
+        )
     integration_id = api.env_optional("INTEGRATION_ID")
     fields: dict = {"role_arn": args.role_arn, "integration_id": integration_id or None}
 

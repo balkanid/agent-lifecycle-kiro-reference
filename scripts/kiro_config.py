@@ -18,14 +18,15 @@ import os
 import re
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+# BALKANID_KIRO_ROOT lets CI verify a pull request's .kiro/ data with trusted scripts from the base branch.
+ROOT = Path(os.environ.get("BALKANID_KIRO_ROOT") or Path(__file__).resolve().parent.parent).resolve()
 AGENTS_DIR = ROOT / ".kiro" / "agents"
 BALKANID_DIR = ROOT / ".kiro" / "balkanid"
 REGISTRATIONS_FILE = BALKANID_DIR / "registrations.json"
 GUARDRAILS_FILE = BALKANID_DIR / "guardrails.json"
 
 AGENT_PROFILE_PREFIX = "balkanid-agent-"
-NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,40}$")  # matches terraform/agent-role
 
 # Hooks every governed agent must carry. Without the PreToolUse hook nothing is enforced.
 REQUIRED_HOOK_TRIGGERS = {
@@ -57,6 +58,18 @@ def fingerprint(config: dict) -> str:
 
 def agent_profile(name: str) -> str:
     return f"{AGENT_PROFILE_PREFIX}{name}"
+
+
+ROLE_PATH = "/balkanid-kiro-agents/"
+
+
+def expected_role_re(name: str) -> re.Pattern:
+    """The only role an agent's credentials may ever come from (created by terraform/agent-role)."""
+    return re.compile(rf"^arn:aws:iam::\d{{12}}:role{re.escape(ROLE_PATH)}kiro-agent-{re.escape(name)}$")
+
+
+def role_arn_ok(name: str, arn: str) -> bool:
+    return bool(expected_role_re(name).match(arn or ""))
 
 
 def _hook_commands(config: dict) -> dict[str, list[str]]:

@@ -62,7 +62,9 @@ class MockBalkanID:
                 return {"createRequest": {"id": None, "success": False, "eventIds": [], "stepUpRequired": True}}
             self._counter += 1
             rid = f"req-{self._counter}"
-            self.requests[rid] = {"id": rid, "status": self.next_status, "requestType": inp["requestType"]}
+            meta = ((inp.get("payload") or {}).get("agentAccess") or {}).get("metadata") or {}
+            self.requests[rid] = {"id": rid, "status": self.next_status, "requestType": inp["requestType"],
+                                  "metadata": {"agentAccess": {"metadata": meta}} if meta else {}}
             return {"createRequest": {"id": rid, "success": True, "eventIds": [], "stepUpRequired": False}}
         if "requests(" in query:
             rid = variables["filter"]["id"]["_eq"]
@@ -79,7 +81,7 @@ class MockBalkanID:
                                 "requestApprovalStatus": node["status"],
                                 "requestProvisioningStatus": None,
                                 "requestType": node["requestType"],
-                                "metadata": {},
+                                "metadata": node.get("metadata", {}),
                             }
                         }
                     ]

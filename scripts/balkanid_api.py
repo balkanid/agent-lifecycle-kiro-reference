@@ -122,7 +122,8 @@ def load_dotenv() -> None:
             value = value.strip()
             if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
                 value = value[1:-1]
-            if key:
+            if key and key not in os.environ:
+                # Real environment wins over .env, so wrappers and CI can override per run.
                 os.environ[key] = value
 
 
@@ -226,15 +227,28 @@ def gql(url: str, key_id: str, secret: str, query: str, variables: dict) -> dict
     return data
 
 
+def _norm(raw: str | None) -> str:
+    return (raw or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _is_denied(n: str) -> bool:
+    return bool(n) and (
+        n in DENIED
+        or "denied" in n
+        or "reject" in n
+        or n.startswith(("not_", "un", "non_"))
+        or "revok" in n
+        or "expired" in n
+    )
+
+
 def approval_outcome(status: str | None, approval: str | None) -> str | None:
-    for raw in (status, approval):
-        if not raw:
-            continue
-        n = raw.strip().lower().replace("-", "_").replace(" ", "_")
-        if n in DENIED or "denied" in n or "reject" in n:
-            return "denied"
-        if n in APPROVED or (("approv" in n or n.endswith("approved")) and "pending" not in n and "await" not in n):
-            return "approved"
+    """Denied wins over approved across both fields; only exact approved values count."""
+    fields = [_norm(status), _norm(approval)]
+    if any(_is_denied(n) for n in fields):
+        return "denied"
+    if any(n in APPROVED for n in fields):
+        return "approved"
     return None
 
 
@@ -275,11 +289,39 @@ def create_request(url: str, key_id: str, secret: str, inp: dict) -> str:
 
 def request_state(url: str, key_id: str, secret: str, request_id: str) -> str:
     """One-shot status check: 'approved', 'denied', 'pending' or 'missing'. Never waits."""
+    return request_check(url, key_id, secret, request_id)[0]
+
+
+def request_check(url: str, key_id: str, secret: str, request_id: str) -> tuple[str, dict]:
+    """Like request_state, but also returns the request node for binding checks."""
     node = get_request_node(url, key_id, secret, request_id)
     if not node:
-        return "missing"
+        return "missing", {}
     outcome = approval_outcome(node.get("status"), node.get("requestApprovalStatus"))
-    return outcome or "pending"
+    return outcome or "pending", node
+
+
+def find_in_metadata(metadata, key: str) -> list:
+    """Collect every value stored under `key` anywhere in a request's metadata."""
+    found: list = []
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except json.JSONDecodeError:
+            return found
+    if isinstance(metadata, dict):
+        for k, v in metadata.items():
+            if k == key:
+                found.append(v)
+            found.extend(find_in_metadata(v, key))
+    elif isinstance(metadata, list):
+        for v in metadata:
+            found.extend(find_in_metadata(v, key))
+    return found
+
+
+def request_type_is(node: dict, expected: str) -> bool:
+    return _norm(node.get("requestType")).replace("_request", "") in (_norm(expected), _norm(expected) + "_request")
 
 
 def poll_request(

@@ -60,6 +60,7 @@ def save(agent: str, creds: dict) -> None:
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = folder / f"{agent}.json"
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)  # also tighten a pre-existing file
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(creds, fh)
 
@@ -120,6 +121,14 @@ def main(argv: list[str] | None = None) -> int:
     role_arn = reg.get("role_arn")
     if not role_arn:
         print(f"[BalkanID] no role_arn recorded for {args.agent}; run scripts/setup_agent_profile.py", file=sys.stderr)
+        return 1
+    if not kc.role_arn_ok(args.agent, role_arn):
+        # Never hand out credentials for anything but this agent's own role, whatever the file says.
+        print(
+            f"[BalkanID] refusing role {role_arn!r}: agent {args.agent!r} may only use "
+            f"arn:aws:iam::<account>:role{kc.ROLE_PATH}kiro-agent-{args.agent}",
+            file=sys.stderr,
+        )
         return 1
 
     creds = cached(args.agent)
