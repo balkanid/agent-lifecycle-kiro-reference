@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "description": "Client-side guardrails evaluated by scripts/kiro_hook.py on every Kiro PreToolUse event. Deny rules are final. Sensitive rules require a live, approved BalkanID grant on the agent's own service account. Patterns are case-insensitive regular expressions matched against every string in the tool input.",
+  "require_agent_profile_for_aws_cli": true,
+  "status_cache_seconds": 300,
+  "deny": [
+    {
+      "id": "developer-credentials",
+      "message": "Agents may not read, export or reuse the developer's AWS credentials. They run as their own BalkanID-issued identity.",
+      "patterns": [
+        "\\.aws/(credentials|config|sso/cache|cli/cache)",
+        "aws\\s+configure\\s+(export-credentials|get|list|set)",
+        "aws\\s+sts\\s+get-session-token",
+        "aws\\s+sso\\s+(login|get-role-credentials)",
+        "AWS_(ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN)\\s*=",
+        "(^|\\s)(printenv|env)(\\s*$|\\s*\\|)"
+      ]
+    },
+    {
+      "id": "privilege-escalation",
+      "message": "Agents may not change IAM, assume other roles or touch the organization. Request access in BalkanID instead.",
+      "patterns": [
+        "aws\\s+iam\\s+(create|attach|put|update|add|delete|detach|remove|pass|tag|untag)-",
+        "aws\\s+sts\\s+assume-role",
+        "aws\\s+organizations\\s+",
+        "aws\\s+sso-admin\\s+",
+        "aws\\s+identitystore\\s+"
+      ]
+    },
+    {
+      "id": "guardrail-tampering",
+      "message": "Agents may not modify their own configuration, hooks or BalkanID registration.",
+      "tools": ["write", "fs_write", "fswrite", "shell", "execute_bash", "execute_cmd"],
+      "patterns": [
+        "\\.kiro/(agents|hooks|balkanid)/",
+        "scripts/(kiro_hook|guardrails|agent_credentials)\\.py"
+      ]
+    },
+    {
+      "id": "destructive-operations",
+      "message": "Destructive infrastructure and data operations are blocked for agents.",
+      "patterns": [
+        "rm\\s+-[a-z]*r[a-z]*f?\\s+(/|~|\\$HOME)(\\s|$)",
+        "terraform\\s+destroy",
+        "terraform\\s+apply\\b.*-auto-approve",
+        "aws\\s+s3\\s+rb\\b",
+        "aws\\s+s3\\s+rm\\b.*--recursive",
+        "aws\\s+(rds|dynamodb|ec2|eks|lambda|cloudformation)\\s+delete-",
+        "aws\\s+ec2\\s+terminate-instances",
+        "git\\s+push\\b.*(--force|\\s-f\\b)"
+      ]
+    }
+  ],
+  "sensitive": [
+    {
+      "id": "secrets-read",
+      "message": "Reading secrets requires a time-bound BalkanID approval with step-up verification.",
+      "patterns": [
+        "secretsmanager\\s+get-secret-value",
+        "ssm\\s+get-parameters?\\b.*--with-decryption",
+        "kms\\s+decrypt"
+      ],
+      "grant": { "type": "policy", "source_name": "BalkanIDAgentSecretsRead" },
+      "duration_seconds": 900
+    },
+    {
+      "id": "production-access",
+      "message": "Touching production resources requires a time-bound BalkanID approval with step-up verification.",
+      "patterns": [
+        "aws\\s+.*\\b(prod|production)\\b"
+      ],
+      "grant": { "type": "policy", "source_name": "BalkanIDAgentProductionReadOnly" },
+      "duration_seconds": 900
+    },
+    {
+      "id": "customer-data",
+      "message": "Reading customer data requires a time-bound BalkanID approval with step-up verification.",
+      "patterns": [
+        "s3://[^\\s]*(customer|pii|cardholder)"
+      ],
+      "grant": { "type": "policy", "source_name": "BalkanIDAgentCustomerDataRead" },
+      "duration_seconds": 900
+    }
+  ]
+}

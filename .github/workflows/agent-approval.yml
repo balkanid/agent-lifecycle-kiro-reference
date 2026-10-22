@@ -1,0 +1,50 @@
+name: Agent approval
+
+# Required status check for pull requests that add or change a Kiro agent.
+# Passes only when every changed agent config matches a live, approved BalkanID registration.
+# Mark "Agent approval / verify" as required in branch protection.
+
+on:
+  pull_request:
+    paths:
+      - ".kiro/agents/**"
+      - ".kiro/balkanid/**"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    environment: agent-approval
+    # Fork PRs never receive secrets; they fail closed here and need a maintainer re-run.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify BalkanID approval for changed agents
+        env:
+          BALKANID_PUBLIC_API_URL: ${{ secrets.BALKANID_PUBLIC_API_URL }}
+          API_KEY_ID: ${{ secrets.BALKANID_API_KEY_ID }}
+          API_KEY_SECRET: ${{ secrets.BALKANID_API_KEY_SECRET }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          changed="$(git diff --name-only "$BASE_SHA"...HEAD -- .kiro/agents | grep -E '\.json$' || true)"
+          if [ -z "$changed" ]; then
+            # registrations.json changed alone: verify every agent still on disk
+            changed="$(ls .kiro/agents/*.json 2>/dev/null || true)"
+          fi
+          status=0
+          for f in $changed; do
+            [ -f "$f" ] || continue   # deleted agents need no approval
+            name="$(basename "$f" .json)"
+            python3 scripts/register_agent.py --agent "$name" --verify || status=1
+          done
+          exit "$status"

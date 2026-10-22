@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile and import
+        run: |
+          python3 -m py_compile scripts/*.py tests/*.py
+          python3 scripts/verify_imports.py
+
+      - name: Unit tests (mock BalkanID API)
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Lint every Kiro agent config
+        run: |
+          shopt -s nullglob
+          for f in .kiro/agents/*.json; do
+            name="$(basename "$f" .json)"
+            python3 scripts/register_agent.py --agent "$name" --lint-only
+          done
+
+      - name: Validate JSON
+        run: |
+          for f in .kiro/agents/*.json .kiro/balkanid/*.json aws/*.json; do jq empty "$f"; done
+
+      - name: Block tracked secret files
+        run: |
+          if git ls-files | grep -E '(^|/)\.env$|\.tfstate|\.tfvars$'; then
+            echo "Sensitive files must not be tracked"
+            exit 1
+          fi
+
+  terraform:
+    name: Terraform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.12.2
+
+      - name: Format check
+        run: terraform fmt -check -recursive terraform
+
+      - name: Validate agent-role
+        working-directory: terraform/agent-role
+        run: |
+          terraform init -backend=false
+          terraform validate
+
+      - name: Validate grant-policies
+        working-directory: terraform/grant-policies
+        run: |
+          terraform init -backend=false
+          terraform validate
+
+  workflows:
+    name: Workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: actionlint
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: TruffleHog
+        uses: trufflesecurity/trufflehog@v3.97.0
+        with:
+          extra_args: --only-verified
