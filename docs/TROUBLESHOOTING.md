@@ -10,5 +10,6 @@
 | Sensitive call blocked with "no BalkanID service account" | `service_account_identity_id` missing | Run `trigger_sync.py`, then `setup_agent_profile.py` without `--skip-identity-lookup` |
 | Sensitive call stays "Waiting on BalkanID request" | Approver has not acted, or step-up not completed | Approve in BalkanID; the next retry checks live status |
 | Grant approved but AWS still denies | BalkanID has not finished attaching the grant policy, or the policy is outside the permissions boundary | Wait for provisioning; make sure the grant's service is in `allowed_services` |
+| Grant policy attached but the agent still cannot read a secret or SSM parameter | `grant-policies` was applied without the secret or parameter in scope, or with the wrong `iam_path` | Re-apply `terraform/grant-policies` from [agent-lifecycle-terraform-reference](https://github.com/balkanid/agent-lifecycle-terraform-reference) with `iam_path="/balkanid-kiro-agents/"`, the secret in `secret_arns` and any parameters in `ssm_parameter_arns` |
 | Hooks do not run at all | Kiro version uses different trigger names, or the agent is not the active one | Check `/agent` in Kiro, compare trigger names with your Kiro version's hook docs |
 | `Agent approval` check fails on a fork PR | Fork PRs do not receive secrets | A maintainer re-runs it from a branch in the main repository |

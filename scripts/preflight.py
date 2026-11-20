@@ -43,7 +43,7 @@ def main(argv: list[str] | None = None) -> int:
         elif reg.get("config_sha256") != kc.fingerprint(config):
             warnings.append("agent config changed since its BalkanID approval: re-register")
         if reg and not reg.get("role_arn"):
-            warnings.append("no role_arn recorded: run scripts/setup_agent_profile.py after terraform/agent-role")
+            warnings.append("no role_arn recorded: run scripts/setup_agent_profile.py after applying terraform/agent-role from agent-lifecycle-terraform-reference")
 
     try:
         import guardrails

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Trigger a BalkanID integration sync via Public API syncIntegration.
 
-Run after terraform/agent-role creates the agent role so BalkanID discovers it.
+Run after terraform/agent-role (agent-lifecycle-terraform-reference) creates the agent role so BalkanID discovers it.
 Requires INTEGRATION_ID (or BALKANID_INTEGRATION_ID) and the same API key env as the gates.
 """
 

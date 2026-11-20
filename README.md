@@ -24,7 +24,7 @@ Kiro agents run with the developer's environment. Any AWS CLI call or AWS MCP se
 Developer writes .kiro/agents/infra-helper.json
   -> register_agent.py      AGENT_ACCESS (owner, purpose, config fingerprint)   -> approved
   -> service_account_gate   CREATE_SERVICE_ACCOUNT (agent role)                   -> approved
-  -> terraform/agent-role   role + permissions boundary  -> trigger_sync.py
+  -> terraform reference    role + permissions boundary  -> trigger_sync.py
   -> setup_agent_profile    [profile balkanid-agent-infra-helper] credential_process
 Kiro session
   SessionStart  -> approval still live? brief the agent on its identity
@@ -51,13 +51,17 @@ scripts/
   kiro_config.py                  Config loading, fingerprint, lint, registrations
   balkanid_api.py                 Shared Public API helpers (stdlib only)
   trigger_sync.py, preflight.py, verify_imports.py
-terraform/
-  agent-role/                     Agent IAM role, trust policy, permissions boundary
-  grant-policies/                 Policies BalkanID attaches for approved grant windows
-aws/kiro-agent-provisioner-iam-policy.json
 .github/workflows/ci.yml, agent-approval.yml
 tests/                            Unit tests against a mock BalkanID API
 ```
+
+The AWS side lives in [agent-lifecycle-terraform-reference](https://github.com/balkanid/agent-lifecycle-terraform-reference), shared with the Bedrock flow:
+
+| Need | Where (in that repo) |
+|---|---|
+| Agent IAM role, trust policy, permissions boundary | `terraform/agent-role` |
+| Policies BalkanID attaches for approved grant windows | `terraform/grant-policies` (set `iam_path = "/balkanid-kiro-agents/"`) |
+| Least-privilege policy for the principal that runs Terraform | `aws/kiro-agent-provisioner-iam-policy.json` |
 
 ## Prerequisites
 
@@ -72,7 +76,7 @@ tests/                            Unit tests against a mock BalkanID API
 **Local**
 
 - Kiro (IDE or CLI) with custom agents and hooks.
-- Python 3.11+ (standard library only), AWS CLI v2, Terraform 1.5+.
+- Python 3.11+ (standard library only), AWS CLI v2, Terraform 1.5+, and a clone of [agent-lifecycle-terraform-reference](https://github.com/balkanid/agent-lifecycle-terraform-reference).
 - A developer role that may call `sts:AssumeRole` on `arn:aws:iam::<account>:role/balkanid-kiro-agents/*`.
 
 ## Quick start
@@ -92,18 +96,32 @@ python3 scripts/preflight.py --agent infra-helper
 
    ```bash
    python3 scripts/service_account_gate.py --agent infra-helper
-   cd terraform/grant-policies && terraform init && terraform apply      # once per account
-   cd ../agent-role && terraform init && terraform apply \
+
+   git clone https://github.com/balkanid/agent-lifecycle-terraform-reference
+   TF=$PWD/agent-lifecycle-terraform-reference/terraform
+
+   # once per account; secret_arns is required (use [] if the agent reads no secrets)
+   terraform -chdir=$TF/grant-policies init
+   terraform -chdir=$TF/grant-policies apply \
+     -var='iam_path=/balkanid-kiro-agents/' \
+     -var='secret_arns=["arn:aws:secretsmanager:us-east-1:123456789012:secret:app/*"]'
+
+   # per agent
+   terraform -chdir=$TF/agent-role init
+   terraform -chdir=$TF/agent-role apply \
      -var="agent_name=infra-helper" \
      -var='developer_principal_arns=["arn:aws:iam::123456789012:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_Developer_abc123"]'
-   cd ../.. && python3 scripts/trigger_sync.py
+
+   python3 scripts/trigger_sync.py
    ```
+
+   Run Terraform as a principal scoped to `aws/kiro-agent-provisioner-iam-policy.json` from the same repo. Reading SSM parameters is off unless you pass `ssm_parameter_arns` to `grant-policies`.
 
 3. **Link the profile:**
 
    ```bash
    python3 scripts/setup_agent_profile.py --agent infra-helper \
-     --role-arn "$(terraform -chdir=terraform/agent-role output -raw role_arn)" --write-aws-config
+     --role-arn "$(terraform -chdir=$TF/agent-role output -raw role_arn)" --write-aws-config
    ```
 
 4. **Commit** `.kiro/agents/infra-helper.json` and `.kiro/balkanid/registrations.json`, open a PR, and let `Agent approval` verify it.
