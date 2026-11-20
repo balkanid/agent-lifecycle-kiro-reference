@@ -2,7 +2,7 @@
 
 Reference implementation for governing [Kiro](https://kiro.dev) custom agents with **BalkanID**, so that an agent a developer creates does **not** inherit that developer's permissions.
 
-Companion to [agent-lifecycle-terraform-reference](https://github.com/balkanid/agent-lifecycle-terraform-reference) (AWS Bedrock creation gate) and [agent-guardrails-bedrock-reference](https://github.com/balkanid/agent-guardrails-bedrock-reference) (the same guardrails for developer-created Bedrock agents). Same Public API, same fail-closed approval gate; here the provisioning plane is a Kiro agent config and a dedicated IAM role.
+Companion to [agent-lifecycle-terraform-reference](https://github.com/balkanid/agent-lifecycle-terraform-reference) (AWS Bedrock creation gate) and its [developer-agent guardrails](https://github.com/balkanid/agent-lifecycle-terraform-reference/blob/main/docs/BEDROCK_GUARDRAILS.md) (the same guardrails for developer-created Bedrock agents). Same Public API, same fail-closed approval gate; here the provisioning plane is a Kiro agent config and a dedicated IAM role.
 
 ## The control gap
 
@@ -100,7 +100,7 @@ python3 scripts/preflight.py --agent infra-helper
    git clone https://github.com/balkanid/agent-lifecycle-terraform-reference
    TF=$PWD/agent-lifecycle-terraform-reference/terraform
 
-   # once per account; secret_arns is required (use [] if the agent reads no secrets)
+   # once per account; secret_arns is required: list the secrets a grant may read (no "*")
    terraform -chdir=$TF/grant-policies init
    terraform -chdir=$TF/grant-policies apply \
      -var='iam_path=/balkanid-kiro-agents/' \
