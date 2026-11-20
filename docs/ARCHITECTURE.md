@@ -49,11 +49,11 @@ flowchart LR
 |---|---|---|
 | Agent config | `.kiro/agents/<name>.json` | Kiro custom agent. Must carry the three BalkanID hooks, deny `~/.aws/**`, and point AWS MCP servers at the agent profile. `register_agent.py --lint-only` enforces this. |
 | Registration | `scripts/register_agent.py` | `createRequest` with `AGENT_ACCESS`, owner, purpose, intended role ARN and a metadata summary (tools, MCP servers, hooks, fingerprint, parent). Waits for approval; fails closed. An approval only counts if the request is `AGENT_ACCESS` and its metadata carries this exact config fingerprint, so a request id cannot be borrowed from another request or an older config. |
-| Agent role | `scripts/service_account_gate.py`, `terraform/agent-role` | `CREATE_SERVICE_ACCOUNT` approval, then Terraform creates `kiro-agent-<name>` under `/balkanid-kiro-agents/` with a permissions boundary. Only listed developer roles may assume it, and only with a SourceIdentity and the agent's session tags. |
+| Agent role | `scripts/service_account_gate.py`, [`terraform/agent-role`](https://github.com/balkanid/agent-lifecycle-terraform-reference/tree/main/terraform/agent-role) | `CREATE_SERVICE_ACCOUNT` approval, then Terraform creates `kiro-agent-<name>` under `/balkanid-kiro-agents/` with a permissions boundary. Only listed developer roles may assume it, and only with a SourceIdentity and the agent's session tags. |
 | Profile link | `scripts/setup_agent_profile.py` | Records the role ARN and BalkanID service account id, and writes the `credential_process` profile. |
 | Credentials | `scripts/agent_credentials.py` | Re-checks the approval, refuses any role other than `role/balkanid-kiro-agents/kiro-agent-<name>`, then assumes it for 15 minutes. Caches until near expiry. |
 | Guardrails | `scripts/kiro_hook.py`, `scripts/guardrails.py`, `.kiro/balkanid/guardrails.json` | Runs on SessionStart, every PreToolUse and SessionEnd. |
-| Grant policies | `terraform/grant-policies` | Account-wide policies BalkanID attaches for an approved grant window. |
+| Grant policies | [`terraform/grant-policies`](https://github.com/balkanid/agent-lifecycle-terraform-reference/tree/main/terraform/grant-policies) | Account-wide policies BalkanID attaches for an approved grant window. Apply with `iam_path = "/balkanid-kiro-agents/"`. |
 | PR gate | `.github/workflows/agent-approval.yml` | Required check: a changed agent config merges only with a live, matching approval. |
 
 ## Control flows
@@ -93,7 +93,7 @@ The hook raises a `SERVICE_ACCOUNT_ASSIGNMENT` against the agent's own service a
 
 ### 4. Subagents
 
-Register a child with `register_agent.py --agent <child> --parent <parent>` and apply `terraform/agent-role` with `parent_agent_name`. The child gets its own role, but shares the parent's permissions boundary, so it can never exceed its parent. The parent's hook only allows `subagent`, `use_subagent` and `delegate` calls whose agent name field exactly matches a registered child.
+Register a child with `register_agent.py --agent <child> --parent <parent>` and apply `terraform/agent-role` (from the terraform reference repo) with `parent_agent_name`. The child gets its own role, but shares the parent's permissions boundary, so it can never exceed its parent. The parent's hook only allows `subagent`, `use_subagent` and `delegate` calls whose agent name field exactly matches a registered child.
 
 ### 5. Ending a session
 

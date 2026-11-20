@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Trigger a BalkanID integration sync via Public API syncIntegration.
 
-Run after terraform/agent-role creates the agent role so BalkanID discovers it.
+Run after terraform/agent-role (agent-lifecycle-terraform-reference) creates the agent role so BalkanID discovers it.
 Requires INTEGRATION_ID (or BALKANID_INTEGRATION_ID) and the same API key env as the gates.
 """
 
@@ -75,4 +75,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    import balkanid_api as _api
+
+    try:
+        sys.exit(main())
+    except (_api.TransportError, _api.ApprovalTimeout) as exc:
+        # These carry a numeric exit status, so Python would exit without the message.
+        _api.log_stderr(exc.message)
+        sys.exit(exc.code)

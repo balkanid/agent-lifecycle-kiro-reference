@@ -217,7 +217,7 @@ def sensitive_check(agent: str, reg: dict, decision: guardrails.Decision, event:
                 f"{decision.message} Waiting on BalkanID request {rid} ({state}). "
                 "Retry after the approver completes step-up verification and approves."
             ), rid
-        if state in ("denied", "missing", "unbound"):
+        if state in ("denied", "partial", "missing", "unbound"):
             return False, (
                 f"{decision.message} BalkanID request {rid} is {state}. Do not retry; tell the user. "
                 f"The owner can clear it with: python3 scripts/kiro_hook.py clear-grant --agent {agent} "

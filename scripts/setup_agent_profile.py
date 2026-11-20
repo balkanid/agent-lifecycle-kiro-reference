@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Connect an approved Kiro agent to its BalkanID-governed AWS identity.
 
-Run after terraform/agent-role has created the role and BalkanID has synced it:
+Run after terraform/agent-role (agent-lifecycle-terraform-reference) has created the role and BalkanID has synced it:
 
   python3 scripts/setup_agent_profile.py --agent infra-helper \
       --role-arn arn:aws:iam::123456789012:role/balkanid-kiro-agents/kiro-agent-infra-helper
@@ -87,4 +87,11 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    import balkanid_api as _api
+
+    try:
+        sys.exit(main())
+    except (_api.TransportError, _api.ApprovalTimeout) as exc:
+        # These carry a numeric exit status, so Python would exit without the message.
+        _api.log_stderr(exc.message)
+        sys.exit(exc.code)

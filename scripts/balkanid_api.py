@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
 """Shared BalkanID Public API helpers for the Kiro agent guardrails reference.
 
-Standard library only. Mirrors the helpers in balkanid/agent-lifecycle-terraform-reference.
+Standard library only, so the scripts run anywhere Python 3.10+ does (CI runners, a developer
+laptop) with no pip install.
+
+Exit-code convention used by the gates:
+  0  approved
+  1  denied, partially approved, or a request/validation failure
+  2  the approval window elapsed with no decision (ApprovalTimeout)
+  3  the BalkanID Public API could not be reached (TransportError)
 """
 
 from __future__ import annotations
@@ -11,6 +18,7 @@ import os
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 CREATE_REQUEST = """
@@ -61,8 +69,6 @@ APPROVED = {
     "approved",
     "completed",
     "provisioned",
-    "partially_approved",
-    "partially approved",
 }
 DENIED = {
     "denied",
@@ -70,7 +76,12 @@ DENIED = {
     "cancelled",
     "canceled",
     "failed",
+    "invalid",
 }
+# Partial approval is deliberately NOT approval. The approver granted less than was
+# requested, so continuing would provision a scope nobody authorised. Fail closed and make
+# the operator re-request what they actually need.
+PARTIAL_MARKER = "partially"
 PROVISIONED = {
     "provisioned",
     "completed",
@@ -172,7 +183,70 @@ def poll_settings() -> tuple[int, int]:
 TRANSIENT_HTTP_CODES = frozenset({429, 502, 503, 504, 520})
 
 
+class TransportError(SystemExit):
+    """Network or API failure, as distinct from a policy decision (gates exit 3).
+
+    Lets a pipeline tell "the policy service was unreachable" from "the approver said no"
+    and from "nobody answered in time".
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+        # SystemExit(message) leaves .code as the string; callers that only catch
+        # SystemExit read .code, so give it the documented exit status.
+        self.code = 3
+
+    def __str__(self) -> str:
+        return self.message
+
+
+class ApprovalTimeout(SystemExit):
+    """The approval window elapsed with no decision (gates exit 2)."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+        # SystemExit(message) leaves .code as the string; callers that only catch
+        # SystemExit read .code, so give it the documented exit status.
+        self.code = 2
+
+    def __str__(self) -> str:
+        return self.message
+
+
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def require_api_url(url: str) -> str:
+    """Only send API keys over HTTPS (plain HTTP to loopback is allowed for local mocks).
+
+    urllib also opens file:// and other schemes, so reject anything else before a request
+    carrying the key secret is built.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme == "https" and parsed.hostname:
+        return url
+    if parsed.scheme == "http" and parsed.hostname in _LOOPBACK_HOSTS:
+        return url
+    raise SystemExit(
+        "BALKANID_PUBLIC_API_URL must be an https:// URL (http:// is allowed only for localhost)"
+    )
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects: urllib would forward the API-key headers to the new location
+    without re-checking it, so a 3xx surfaces as an HTTPError instead of being followed."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 def gql(url: str, key_id: str, secret: str, query: str, variables: dict) -> dict:
+    url = require_api_url(url)
     body = json.dumps({"query": query, "variables": variables}).encode()
     max_attempts = max(1, int(env_optional("GQL_MAX_RETRIES", "5")))
     backoff_s = float(env_optional("GQL_RETRY_BACKOFF_SECONDS", "2"))
@@ -192,7 +266,7 @@ def gql(url: str, key_id: str, secret: str, query: str, variables: dict) -> dict
             },
         )
         try:
-            with urllib.request.urlopen(req, timeout=float(env_optional("GQL_TIMEOUT_SECONDS", "120"))) as resp:
+            with _OPENER.open(req, timeout=float(env_optional("GQL_TIMEOUT_SECONDS", "120"))) as resp:
                 payload = json.loads(resp.read().decode())
             last_err = None
             break
@@ -205,17 +279,17 @@ def gql(url: str, key_id: str, secret: str, query: str, variables: dict) -> dict
                 time.sleep(backoff_s * attempt)
                 last_err = err
                 continue
-            raise SystemExit(http_error_message(err.code, detail, url)) from err
+            raise TransportError(http_error_message(err.code, detail, url)) from err
         except urllib.error.URLError as err:
             if attempt < max_attempts:
                 log_stderr(f"public API unreachable (attempt {attempt}/{max_attempts}); retrying")
                 time.sleep(backoff_s * attempt)
                 last_err = err
                 continue
-            raise SystemExit(f"public API request failed: {err}") from err
+            raise TransportError(f"public API request failed: {err}") from err
 
     if payload is None:
-        raise SystemExit(f"public API request failed after {max_attempts} attempts: {last_err}")
+        raise TransportError(f"public API request failed after {max_attempts} attempts: {last_err}")
 
     if payload.get("errors"):
         if ci_mode():
@@ -243,10 +317,12 @@ def _is_denied(n: str) -> bool:
 
 
 def approval_outcome(status: str | None, approval: str | None) -> str | None:
-    """Denied wins over approved across both fields; only exact approved values count."""
+    """Denied wins over partial, partial over approved; only exact approved values count."""
     fields = [_norm(status), _norm(approval)]
     if any(_is_denied(n) for n in fields):
         return "denied"
+    if any(PARTIAL_MARKER in n for n in fields):
+        return "partial"
     if any(n in APPROVED for n in fields):
         return "approved"
     return None
@@ -352,6 +428,12 @@ def poll_request(
             if approval_state == "denied":
                 log_stderr(f"{label} denied: request_id={request_id}")
                 raise SystemExit(1)
+            if approval_state == "partial":
+                log_stderr(
+                    f"{label} partially approved: request_id={request_id}. The approver granted less "
+                    "than was requested, so the pipeline stops. Raise a new request for the scope you need."
+                )
+                raise SystemExit(1)
             if approval_state == "approved":
                 if not wait_provisioning:
                     return node
@@ -362,7 +444,7 @@ def poll_request(
                 if prov_state == "provisioned":
                     return node
         time.sleep(poll_s)
-    raise SystemExit(f"timed out after {timeout_s}s waiting on {label} request_id={request_id}")
+    raise ApprovalTimeout(f"timed out after {timeout_s}s waiting on {label} request_id={request_id}")
 
 
 def find_identity_id(
@@ -370,18 +452,20 @@ def find_identity_id(
     key_id: str,
     secret: str,
     integration_id: str,
-    role_name: str,
+    handle: str,
     *,
+    source_type: str = "aws service role",
     poll_s: int = 5,
     timeout_s: int = 300,
 ) -> dict:
-    """Wait until the AWS service role identity appears in the graph."""
-    log_stderr(f"resolving identity for role={role_name!r} integration={integration_id!r}")
+    """Wait until an identity (AWS service role, Entra service principal, ...) appears in the graph."""
+    shown = redact_identifier(integration_id) if ci_mode() else integration_id
+    log_stderr(f"resolving identity for handle={handle!r} integration={shown!r}")
     deadline = time.time() + timeout_s
     filt = {
-        "handle": {"_eq": role_name},
+        "handle": {"_eq": handle},
         "integration": {"id": {"_eq": integration_id}},
-        "sourceType": {"_eq": "aws service role"},
+        "sourceType": {"_eq": source_type},
     }
     while time.time() < deadline:
         listed = gql(url, key_id, secret, GET_IDENTITY, {"filter": filt, "first": 1})
@@ -391,7 +475,7 @@ def find_identity_id(
             if node.get("id"):
                 return node
         time.sleep(poll_s)
-    raise SystemExit(f"timed out resolving identity for role {role_name!r}")
+    raise SystemExit(f"timed out resolving identity for handle {handle!r}")
 
 
 def role_arn_from_identity(role_name: str, identity: dict, aws_account_id: str) -> str:
@@ -399,3 +483,4 @@ def role_arn_from_identity(role_name: str, identity: dict, aws_account_id: str) 
     if source_id.startswith("arn:aws:iam::"):
         return source_id
     return f"arn:aws:iam::{aws_account_id}:role/{role_name}"
+
