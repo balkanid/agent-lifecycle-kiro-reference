@@ -18,6 +18,7 @@ import os
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 CREATE_REQUEST = """
@@ -214,7 +215,38 @@ class ApprovalTimeout(SystemExit):
         return self.message
 
 
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def require_api_url(url: str) -> str:
+    """Only send API keys over HTTPS (plain HTTP to loopback is allowed for local mocks).
+
+    urllib also opens file:// and other schemes, so reject anything else before a request
+    carrying the key secret is built.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme == "https" and parsed.hostname:
+        return url
+    if parsed.scheme == "http" and parsed.hostname in _LOOPBACK_HOSTS:
+        return url
+    raise SystemExit(
+        "BALKANID_PUBLIC_API_URL must be an https:// URL (http:// is allowed only for localhost)"
+    )
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects: urllib would forward the API-key headers to the new location
+    without re-checking it, so a 3xx surfaces as an HTTPError instead of being followed."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 def gql(url: str, key_id: str, secret: str, query: str, variables: dict) -> dict:
+    url = require_api_url(url)
     body = json.dumps({"query": query, "variables": variables}).encode()
     max_attempts = max(1, int(env_optional("GQL_MAX_RETRIES", "5")))
     backoff_s = float(env_optional("GQL_RETRY_BACKOFF_SECONDS", "2"))
@@ -234,7 +266,7 @@ def gql(url: str, key_id: str, secret: str, query: str, variables: dict) -> dict
             },
         )
         try:
-            with urllib.request.urlopen(req, timeout=float(env_optional("GQL_TIMEOUT_SECONDS", "120"))) as resp:
+            with _OPENER.open(req, timeout=float(env_optional("GQL_TIMEOUT_SECONDS", "120"))) as resp:
                 payload = json.loads(resp.read().decode())
             last_err = None
             break
