@@ -100,14 +100,18 @@ python3 scripts/preflight.py --agent infra-helper
    git clone https://github.com/balkanid/agent-lifecycle-terraform-reference
    TF="$PWD/agent-lifecycle-terraform-reference/terraform"
 
-   # once per account; secret_arns is required: list the secrets a grant may read (no "*")
+   # once per account, in its own workspace so it never shares state with the Bedrock guardrails grants
+   # (policy names are account-wide, so don't also apply the Bedrock grants in the same account yet).
+   # secret_arns is required: list the secrets a grant may read (no "*")
    terraform -chdir="$TF/grant-policies" init
+   terraform -chdir="$TF/grant-policies" workspace select -or-create kiro
    terraform -chdir="$TF/grant-policies" apply \
      -var='iam_path=/balkanid-kiro-agents/' \
      -var='secret_arns=["arn:aws:secretsmanager:us-east-1:123456789012:secret:app/*"]'
 
-   # per agent
+   # per agent, one workspace each so a second agent doesn't replace the first
    terraform -chdir="$TF/agent-role" init
+   terraform -chdir="$TF/agent-role" workspace select -or-create infra-helper
    terraform -chdir="$TF/agent-role" apply \
      -var="agent_name=infra-helper" \
      -var='developer_principal_arns=["arn:aws:iam::123456789012:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_Developer_abc123"]'
@@ -115,7 +119,7 @@ python3 scripts/preflight.py --agent infra-helper
    python3 scripts/trigger_sync.py
    ```
 
-   Already applied these from this repo's old `terraform/` directories? Keep that state: copy each `terraform.tfstate` into the matching directory under `$TF` before `apply` (or `terraform import` the role and policies). A fresh state tries to create roles and policies that already exist and fails.
+   Already applied these from this repo's old `terraform/` directories? Keep that state: after selecting the workspace, copy each old `terraform.tfstate` to `terraform.tfstate.d/<workspace>/terraform.tfstate` in the matching directory under `$TF` (or `terraform import` the role and policies), and pass the same `-var` values you used before, so `plan` shows no replacement. A fresh state tries to create roles and policies that already exist and fails.
 
    Run Terraform as a principal scoped to `aws/kiro-agent-provisioner-iam-policy.json` from the same repo. Reading SSM parameters is off unless you pass `ssm_parameter_arns` to `grant-policies`.
 
