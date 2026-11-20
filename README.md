@@ -98,22 +98,24 @@ python3 scripts/preflight.py --agent infra-helper
    python3 scripts/service_account_gate.py --agent infra-helper
 
    git clone https://github.com/balkanid/agent-lifecycle-terraform-reference
-   TF=$PWD/agent-lifecycle-terraform-reference/terraform
+   TF="$PWD/agent-lifecycle-terraform-reference/terraform"
 
    # once per account; secret_arns is required: list the secrets a grant may read (no "*")
-   terraform -chdir=$TF/grant-policies init
-   terraform -chdir=$TF/grant-policies apply \
+   terraform -chdir="$TF/grant-policies" init
+   terraform -chdir="$TF/grant-policies" apply \
      -var='iam_path=/balkanid-kiro-agents/' \
      -var='secret_arns=["arn:aws:secretsmanager:us-east-1:123456789012:secret:app/*"]'
 
    # per agent
-   terraform -chdir=$TF/agent-role init
-   terraform -chdir=$TF/agent-role apply \
+   terraform -chdir="$TF/agent-role" init
+   terraform -chdir="$TF/agent-role" apply \
      -var="agent_name=infra-helper" \
      -var='developer_principal_arns=["arn:aws:iam::123456789012:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_Developer_abc123"]'
 
    python3 scripts/trigger_sync.py
    ```
+
+   Already applied these from this repo's old `terraform/` directories? Keep that state: copy each `terraform.tfstate` into the matching directory under `$TF` before `apply` (or `terraform import` the role and policies). A fresh state tries to create roles and policies that already exist and fails.
 
    Run Terraform as a principal scoped to `aws/kiro-agent-provisioner-iam-policy.json` from the same repo. Reading SSM parameters is off unless you pass `ssm_parameter_arns` to `grant-policies`.
 
@@ -121,7 +123,7 @@ python3 scripts/preflight.py --agent infra-helper
 
    ```bash
    python3 scripts/setup_agent_profile.py --agent infra-helper \
-     --role-arn "$(terraform -chdir=$TF/agent-role output -raw role_arn)" --write-aws-config
+     --role-arn "$(terraform -chdir="$TF/agent-role" output -raw role_arn)" --write-aws-config
    ```
 
 4. **Commit** `.kiro/agents/infra-helper.json` and `.kiro/balkanid/registrations.json`, open a PR, and let `Agent approval` verify it.

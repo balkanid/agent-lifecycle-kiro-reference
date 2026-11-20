@@ -192,6 +192,12 @@ class TransportError(SystemExit):
     def __init__(self, message: str) -> None:
         super().__init__(message)
         self.message = message
+        # SystemExit(message) leaves .code as the string; callers that only catch
+        # SystemExit read .code, so give it the documented exit status.
+        self.code = 3
+
+    def __str__(self) -> str:
+        return self.message
 
 
 class ApprovalTimeout(SystemExit):
@@ -200,6 +206,12 @@ class ApprovalTimeout(SystemExit):
     def __init__(self, message: str) -> None:
         super().__init__(message)
         self.message = message
+        # SystemExit(message) leaves .code as the string; callers that only catch
+        # SystemExit read .code, so give it the documented exit status.
+        self.code = 2
+
+    def __str__(self) -> str:
+        return self.message
 
 
 def gql(url: str, key_id: str, secret: str, query: str, variables: dict) -> dict:
